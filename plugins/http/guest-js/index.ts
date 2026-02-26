@@ -113,6 +113,52 @@ export interface DangerousSettings {
 
 const ERROR_REQUEST_CANCELLED = 'Request cancelled'
 
+// Debug logging for Tauri HTTP requests
+// Enabled by default; set window.__TAURI_HTTP_DEBUG__ = false to disable
+const DEBUG_HTTP = typeof (globalThis as any).__TAURI_HTTP_DEBUG__ !== 'undefined'
+  ? (globalThis as any).__TAURI_HTTP_DEBUG__
+  : true
+
+function logRequest(
+  method: string,
+  url: string,
+  status: number,
+  statusText: string,
+  requestHeaders: Array<[string, string]>,
+  responseHeaders: Array<[string, string]>,
+  duration: number,
+  proxy?: Proxy
+) {
+  if (!DEBUG_HTTP) return
+  const statusColor = status >= 200 && status < 300 ? '#4CAF50' : status >= 400 ? '#f44336' : '#ff9800'
+  const proxyInfo = proxy
+    ? (() => {
+        const p = proxy.all
+        return p ? (typeof p === 'string' ? p : p.url) : ''
+      })()
+    : ''
+  const proxyLabel = proxyInfo ? ` | proxy: ${proxyInfo}` : ''
+  console.groupCollapsed(
+    `%c[Tauri HTTP]%c ${method} %c${url}%c → %c${status} ${statusText}%c ${duration}ms${proxyLabel}`,
+    'color:#7c4dff;font-weight:bold',
+    'color:#333;font-weight:bold',
+    'color:#1976D2',
+    'color:#999',
+    `color:${statusColor};font-weight:bold`,
+    'color:#999'
+  )
+  const reqHeadersObj = Object.fromEntries(requestHeaders.map(([k, v]) =>
+    [k, k.toLowerCase() === 'authorization' ? v.substring(0, 15) + '...' : v]
+  ))
+  const resHeadersObj = Object.fromEntries(responseHeaders)
+  console.log('%cRequest Headers', 'font-weight:bold;color:#666', reqHeadersObj)
+  console.log('%cResponse Headers', 'font-weight:bold;color:#666', resHeadersObj)
+  if (proxyInfo) {
+    console.log('%cProxy', 'font-weight:bold;color:#666', proxyInfo)
+  }
+  console.groupEnd()
+}
+
 /**
  * Fetch a resource from the network. It returns a `Promise` that resolves to the
  * `Response` to that `Request`, whether it is successful or not.
@@ -131,6 +177,8 @@ export async function fetch(
   input: URL | Request | string,
   init?: RequestInit & ClientOptions
 ): Promise<Response> {
+  const startTime = performance.now()
+
   // Optimistically check for abort signal and avoid doing any work
   const signal = init?.signal
   if (signal?.aborted) {
@@ -237,6 +285,10 @@ export async function fetch(
   } = await invoke<FetchSendResponse>('plugin:http|fetch_send', {
     rid
   })
+
+  // Structured debug logging
+  const duration = Math.round(performance.now() - startTime)
+  logRequest(req.method, url || req.url, status, statusText, mappedHeaders, responseHeaders as unknown as Array<[string, string]>, duration, proxy)
 
   const dropBody = () => {
     return invoke('plugin:http|fetch_cancel_body', { rid: responseRid })
