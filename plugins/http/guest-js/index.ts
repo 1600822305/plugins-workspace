@@ -78,8 +78,13 @@ export interface ClientOptions {
    * If set to 0, no redirects will be followed.
    */
   maxRedirections?: number
-  /** Timeout in milliseconds */
+  /** Connect timeout in milliseconds */
   connectTimeout?: number
+  /**
+   * Read timeout in milliseconds. Limits how long to wait for response body data.
+   * When using SOCKS5 proxies, a default of 120s is applied automatically if not set.
+   */
+  readTimeout?: number
   /**
    * Configuration of a proxy that a Client should pass requests to.
    */
@@ -134,6 +139,7 @@ export async function fetch(
 
   const maxRedirections = init?.maxRedirections
   const connectTimeout = init?.connectTimeout
+  const readTimeout = init?.readTimeout
   const proxy = init?.proxy
   const danger = init?.danger
 
@@ -141,6 +147,7 @@ export async function fetch(
   if (init) {
     delete init.maxRedirections
     delete init.connectTimeout
+    delete init.readTimeout
     delete init.proxy
     delete init.danger
   }
@@ -194,6 +201,7 @@ export async function fetch(
       data,
       maxRedirections,
       connectTimeout,
+      readTimeout,
       proxy,
       danger
     }

@@ -91,6 +91,7 @@ pub struct ClientConfig {
     headers: Vec<(String, String)>,
     data: Option<Vec<u8>>,
     connect_timeout: Option<u64>,
+    read_timeout: Option<u64>,
     max_redirections: Option<usize>,
     proxy: Option<Proxy>,
     danger: Option<DangerousSettings>,
@@ -188,6 +189,7 @@ pub async fn fetch<R: Runtime>(
         headers: headers_raw,
         data,
         connect_timeout,
+        read_timeout,
         max_redirections,
         proxy,
         danger,
@@ -252,6 +254,12 @@ pub async fn fetch<R: Runtime>(
                     builder = builder.connect_timeout(Duration::from_millis(timeout));
                 }
 
+                // Set read timeout to prevent body reading from hanging
+                // This is critical for SOCKS5 proxies where EOF may not propagate
+                if let Some(timeout) = read_timeout {
+                    builder = builder.read_timeout(Duration::from_millis(timeout));
+                }
+
                 if let Some(max_redirections) = max_redirections {
                     builder = builder.redirect(if max_redirections == 0 {
                         Policy::none()
@@ -262,6 +270,15 @@ pub async fn fetch<R: Runtime>(
 
                 if let Some(proxy_config) = proxy {
                     builder = attach_proxy(proxy_config, builder)?;
+                    // When using a proxy, disable connection pooling to avoid
+                    // keep-alive issues where the proxy holds the connection open
+                    // and chunk() never receives EOF
+                    builder = builder.pool_max_idle_per_host(0);
+                    // Set a default read timeout if not explicitly provided
+                    // to prevent infinite hanging on body reads through proxies
+                    if read_timeout.is_none() {
+                        builder = builder.read_timeout(Duration::from_secs(120));
+                    }
                 }
 
                 #[cfg(feature = "cookies")]
@@ -432,12 +449,31 @@ pub async fn fetch_read_body<R: Runtime>(
     let res = unsafe { &mut *res_ptr };
     let res = &mut res.0;
 
-    let Some(chunk) = res.chunk().await? else {
-        let mut resources_table = webview.resources_table();
-        resources_table.close(rid)?;
+    // Use a timeout to prevent chunk() from hanging indefinitely.
+    // Through SOCKS5 proxies, some servers/CDNs use keep-alive connections
+    // where the proxy doesn't properly forward TCP EOF, causing chunk() to
+    // wait forever after the last byte has been received.
+    let chunk_result = tokio::time::timeout(
+        Duration::from_secs(120),
+        res.chunk()
+    ).await;
 
-        // return a response with a single byte to indicate that the body is empty
-        return Ok(tauri::ipc::Response::new(vec![1]));
+    let chunk = match chunk_result {
+        Ok(Ok(Some(chunk))) => chunk,
+        Ok(Ok(None)) => {
+            // Normal EOF
+            let mut resources_table = webview.resources_table();
+            resources_table.close(rid)?;
+            return Ok(tauri::ipc::Response::new(vec![1]));
+        }
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => {
+            // Timeout - treat as EOF. This handles the case where the
+            // proxy holds the connection open but no more data is coming.
+            let mut resources_table = webview.resources_table();
+            resources_table.close(rid)?;
+            return Ok(tauri::ipc::Response::new(vec![1]));
+        }
     };
 
     let mut chunk = chunk.to_vec();
