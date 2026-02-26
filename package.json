@@ -37,5 +37,8 @@
   },
   "engines": {
     "pnpm": "^10.16.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1"
   }
 }
